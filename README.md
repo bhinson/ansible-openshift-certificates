@@ -4,7 +4,7 @@ https://access.redhat.com/solutions/3782361
 <p>
 This repository contains the following playbooks:
 <p>
-Primary playbook:
+Primary playbook:<br>
 ---------------
 update-bootstrap-certificates.yml: update bootstrap certificates
 <p>
