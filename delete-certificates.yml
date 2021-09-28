@@ -1,0 +1,14 @@
+# https://access.redhat.com/solutions/3782361
+---
+- name: Delete all certificate requests
+  hosts: masters[0]
+  gather_facts: no
+  become: yes
+
+  tasks:
+  - name: Login to OpenShift
+    shell: oc login -u system:admin
+
+  - name: Delete all certificate requests
+    shell: "oc get csr -o name | xargs oc delete"
+    ignore_errors: yes

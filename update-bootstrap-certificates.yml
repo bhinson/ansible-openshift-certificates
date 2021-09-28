@@ -1,0 +1,186 @@
+# https://access.redhat.com/solutions/3782361
+---
+- name: Create a new bootstrap kubeconfig for nodes
+  hosts: masters[0]
+  gather_facts: no
+
+  tasks:
+  - name: Login to OpenShift
+    shell: oc login -u system:admin
+    become: yes
+
+  - name: Get pending certificate requests - Pass 1
+    shell: "oc get csr | grep -i pending | awk '{ print $1 }'"
+    register: pending_certs
+    delegate_to: localhost
+
+  - name: Show pending certificates
+    debug:
+      verbosity: 1
+      var: pending_certs.stdout_lines
+
+  - name: Approve pending certificate requests - Pass 1
+    shell: "oc adm certificate approve {{ item }}"
+    loop: "{{ pending_certs.stdout_lines }}"
+    delegate_to: localhost
+
+  - name: Create new bootstrap.kubeconfig
+    shell: oc serviceaccounts create-kubeconfig node-bootstrapper -n openshift-infra --config /etc/origin/master/admin.kubeconfig > ~/bootstrap.kubeconfig creates=~/bootstrap.kubeconfig
+    become: yes
+
+  - name: Download bootstrap.kubeconfig
+    fetch:
+      src: ~/bootstrap.kubeconfig
+      dest: /tmp
+    become: yes
+
+
+- name: Prepare masters
+  hosts: masters
+  gather_facts: no
+  become: yes
+
+  tasks:
+  - name: Copy admin.kubeconfig
+    copy:
+      src: /etc/origin/master/admin.kubeconfig
+      dest: /etc/origin/node/bootstrap.kubeconfig
+      mode: 0600
+      remote_src: yes
+      backup: yes
+
+  - name: Copy newly created bootstrap.kubeconfig to masters
+    copy:
+      src: "/tmp/{{ groups['masters'][0] }}/root/bootstrap.kubeconfig"
+      dest: /etc/origin/master/bootstrap.kubeconfig
+      mode: 0644
+      backup: yes
+
+
+- name: Prepare infrastructure and compute nodes
+  hosts: nodes,!masters
+  gather_facts: no
+  become: yes
+
+  tasks:
+  - name: Copy newly created admin.kubeconfig to nodes
+    copy:
+      src: "/tmp/{{ groups['masters'][0] }}/root/bootstrap.kubeconfig"
+      dest: /etc/origin/node/bootstrap.kubeconfig
+      mode: 0700
+      backup: yes
+
+
+- name: Backup and remove existing configuration files
+  hosts: nodes
+  gather_facts: no
+  become: yes
+
+  tasks:
+  - name: Backup client-ca.crt
+    copy:
+      src: /etc/origin/node/client-ca.crt
+      dest: /etc/origin/node/client-ca.crt.old
+      mode: 0644
+      remote_src: yes
+    ignore_errors: yes
+
+  - name: Backup node.kubeconfig
+    copy:
+      src: /etc/origin/node/node.kubeconfig
+      dest: /etc/origin/node/node.kubeconfig.old
+      mode: 0600
+      remote_src: yes
+    ignore_errors: yes
+
+  - name: Remove node.kubeconfig and client-ca.crt
+    file:
+      path: "{{ item }}"
+      state: absent
+    loop:
+      - /etc/origin/node/client-ca.crt
+      - /etc/origin/node/node.kubeconfig
+
+  - name: Create backup directory
+    file:
+      path: ~/node-cert-backup
+      state: directory
+
+  - name: Backup and remove certificates directory
+    archive:
+      path: /etc/origin/node/certificates
+      dest: "~/node-cert-backup/node-cert-backup-{{ lookup('pipe','date +%Y%m%d-%H%M') }}.tar.gz"
+      remove: yes
+
+
+- name: Restart OpenShift services
+  hosts: nodes
+  gather_facts: no
+  serial: 1
+
+  tasks:
+  - name: Restart atomic-openshift-node
+    service:
+      name: atomic-openshift-node
+      state: restarted
+    become: yes
+    async: 60
+    poll: 0
+    register: service_sleeper
+
+  - name: Wait for certificate generation - Pass 1
+    pause:
+      seconds: 10
+
+  - name: Get pending certificate requests - Pass 1
+    shell: "oc get csr | grep -i pending | awk '{ print $1 }'"
+    register: pending_certs
+    delegate_to: localhost
+
+  - name: Show pending certificates
+    debug:
+      verbosity: 1
+      var: pending_certs.stdout_lines
+
+  - name: Approve pending certificate requests - Pass 1
+    shell: "oc adm certificate approve {{ item }}"
+    loop: "{{ pending_certs.stdout_lines }}"
+    delegate_to: localhost
+
+  - name: Wait for certificate generation - Pass 2
+    pause:
+      seconds: 10
+
+  - name: Get pending certificate requests - Pass 2
+    shell: "oc get csr | grep -i pending | awk '{ print $1 }'"
+    register: pending_certs
+    delegate_to: localhost
+
+  - name: Show pending certificates
+    debug:
+      verbosity: 1
+      var: pending_certs.stdout_lines
+
+  - name: Approve pending certificate requests - Pass 2
+    shell: "oc adm certificate approve {{ item }}"
+    loop: "{{ pending_certs.stdout_lines }}"
+    delegate_to: localhost
+
+  - name: Wait for service restart
+    async_status:
+      jid: "{{ service_sleeper.ansible_job_id }}"
+    become: yes
+    register: job_result
+    until: job_result.finished
+    retries: 60
+
+- name: Cleanup intermediate certificate
+  hosts: masters[0]
+  gather_facts: no
+  become: yes
+
+  tasks:
+  - name: Remove temporary bootstrap.kubeconfig
+    file:
+      path: ~/bootstrap.kubeconfig
+      state: absent

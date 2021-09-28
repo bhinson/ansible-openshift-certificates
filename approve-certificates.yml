@@ -1,0 +1,14 @@
+# https://access.redhat.com/solutions/3782361
+---
+- name: Create a new bootstrap kubeconfig for nodes
+  hosts: masters[0]
+  gather_facts: no
+  become: yes
+
+  tasks:
+  - name: Login to OpenShift
+    shell: oc login -u system:admin
+
+  - name: Approve pending certificate requests
+    shell: "oc get csr -o name | xargs oc adm certificate approve"
+    ignore_errors: yes
